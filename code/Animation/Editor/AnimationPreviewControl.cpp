@@ -1,6 +1,6 @@
 /*
  * TRAKTOR
- * Copyright (c) 2022-2024 Anders Pistol.
+ * Copyright (c) 2022-2025 Anders Pistol.
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -9,6 +9,8 @@
 #include "Animation/Editor/AnimationPreviewControl.h"
 
 #include "Animation/AnimatedMeshComponent.h"
+#include "Animation/Animation/AnimationGraphPoseController.h"
+#include "Animation/Animation/RtStateGraphResourceFactory.h"
 #include "Animation/AnimationResourceFactory.h"
 #include "Animation/Joint.h"
 #include "Animation/Skeleton.h"
@@ -79,9 +81,6 @@ T_IMPLEMENT_RTTI_CLASS(L"traktor.animation.AnimationPreviewControl", AnimationPr
 
 AnimationPreviewControl::AnimationPreviewControl(editor::IEditor* editor)
 	: m_editor(editor)
-	, m_position(0.0f, -2.0f, 7.0f, 1.0f)
-	, m_angleHead(0.0f)
-	, m_anglePitch(0.0f)
 {
 }
 
@@ -111,6 +110,7 @@ bool AnimationPreviewControl::create(ui::Widget* parent)
 	entityFactory->addFactory(initializeFactory(new mesh::MeshEntityFactory(), objectStore));
 
 	m_resourceManager->addFactory(new AnimationResourceFactory());
+	m_resourceManager->addFactory(new RtStateGraphResourceFactory());
 	m_resourceManager->addFactory(new mesh::MeshResourceFactory(m_renderSystem));
 	m_resourceManager->addFactory(new render::AliasTextureFactory());
 	m_resourceManager->addFactory(new render::ShaderFactory(m_renderSystem));
@@ -195,6 +195,19 @@ void AnimationPreviewControl::setPoseController(IPoseController* poseController)
 	updatePreview();
 }
 
+void AnimationPreviewControl::setParameterValue(const std::wstring& parameterName, bool value)
+{
+	AnimationGraphPoseController* poseController = dynamic_type_cast< AnimationGraphPoseController* >(m_poseController);
+	if (poseController)
+		poseController->setParameterValue(render::Handle(parameterName.c_str()), value);
+}
+
+void AnimationPreviewControl::setView(const View& view)
+{
+	m_view = view;
+	updatePreview();
+}
+
 void AnimationPreviewControl::updateSettings()
 {
 	Ref< PropertyGroup > colors = m_editor->getSettings()->getProperty< PropertyGroup >(L"Editor.Colors");
@@ -244,6 +257,7 @@ void AnimationPreviewControl::updatePreview()
 	m_entity = new world::Entity();
 	m_entity->setComponent(skeletonComponent);
 	m_entity->setComponent(meshComponent);
+	m_entity->setState(world::EntityState::Dynamic, world::EntityState::Dynamic, true);
 }
 
 void AnimationPreviewControl::updateWorldRenderer()
@@ -264,6 +278,16 @@ void AnimationPreviewControl::updateWorldRenderer()
 	world::WorldCreateDesc wcd;
 	wcd.worldRenderSettings = m_sceneInstance->getWorldRenderSettings();
 	wcd.entityRenderers = worldEntityRenderers;
+
+	// Use same quality settings as scene editor.
+	// #fixme Quality settings should probably be a general editor configuration.
+	const PropertyGroup* settings = m_editor->getSettings();
+	wcd.quality.imageProcess = (world::Quality)settings->getProperty< int32_t >(L"SceneEditor.PostProcessQuality", 4);
+	wcd.quality.motionBlur = world::Quality::Disabled;
+	wcd.quality.shadows = (world::Quality)settings->getProperty< int32_t >(L"SceneEditor.ShadowQuality", 4);
+	wcd.quality.reflections = (world::Quality)settings->getProperty< int32_t >(L"SceneEditor.ReflectionsQuality", 4);
+	wcd.quality.ambientOcclusion = (world::Quality)settings->getProperty< int32_t >(L"SceneEditor.AmbientOcclusionQuality", 4);
+	wcd.quality.antiAlias = (world::Quality)settings->getProperty< int32_t >(L"SceneEditor.AntiAliasQuality", 4);
 
 	Ref< world::IWorldRenderer > worldRenderer = new world::WorldRendererDeferred();
 	if (!worldRenderer->create(
@@ -298,20 +322,20 @@ void AnimationPreviewControl::eventMouseMove(ui::MouseMoveEvent* event)
 			// Move X/Z direction.
 			const float dx = -float(m_lastMousePosition.x - event->getPosition().x) * c_deltaMoveScale;
 			const float dz = -float(m_lastMousePosition.y - event->getPosition().y) * c_deltaMoveScale;
-			m_position += Vector4(dx, 0.0f, dz, 0.0f);
+			m_view.position += Vector4(dx, 0.0f, dz, 0.0f);
 		}
 		else
 		{
 			// Move X/Y direction.
 			const float dx = -float(m_lastMousePosition.x - event->getPosition().x) * c_deltaMoveScale;
 			const float dy = float(m_lastMousePosition.y - event->getPosition().y) * c_deltaMoveScale;
-			m_position += Vector4(dx, dy, 0.0f, 0.0f);
+			m_view.position += Vector4(dx, dy, 0.0f, 0.0f);
 		}
 	}
 	else if (event->getButton() == ui::MbtRight)
 	{
-		m_angleHead += float(m_lastMousePosition.x - event->getPosition().x) * c_deltaScaleHead;
-		m_anglePitch += float(m_lastMousePosition.y - event->getPosition().y) * c_deltaScalePitch;
+		m_view.head += float(m_lastMousePosition.x - event->getPosition().x) * c_deltaScaleHead;
+		m_view.pitch += float(m_lastMousePosition.y - event->getPosition().y) * c_deltaScalePitch;
 	}
 
 	m_lastMousePosition = event->getPosition();
@@ -372,7 +396,7 @@ void AnimationPreviewControl::eventPaint(ui::PaintEvent* event)
 
 	const float aspect = float(sz.cx) / sz.cy;
 
-	const Matrix44 viewTransform = translate(m_position) * rotateX(m_anglePitch) * rotateY(m_angleHead);
+	const Matrix44 viewTransform = translate(m_view.position) * rotateX(m_view.pitch) * rotateY(m_view.head);
 	const Matrix44 projectionTransform = perspectiveLh(
 		65.0f * PI / 180.0f,
 		aspect,

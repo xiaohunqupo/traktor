@@ -1,6 +1,6 @@
 /*
  * TRAKTOR
- * Copyright (c) 2022 Anders Pistol.
+ * Copyright (c) 2022-2025 Anders Pistol.
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -8,12 +8,11 @@
  */
 #pragma once
 
-#include <string>
-#include "Core/Containers/SmallMap.h"
 #include "Animation/IPoseController.h"
-#include "Animation/Pose.h"
-#include "Animation/Animation/StateContext.h"
+#include "Render/Types.h"
 #include "Resource/Proxy.h"
+
+#include <string>
 
 // import/export mechanism.
 #undef T_DLLCLASS
@@ -26,10 +25,8 @@
 namespace traktor::animation
 {
 
-class AnimationGraph;
+class RtStateGraph;
 class ITransformTime;
-class StateNode;
-class StateContext;
 
 /*! Animation pose evaluation controller.
  * \ingroup Animation
@@ -39,11 +36,11 @@ class T_DLLCLASS AnimationGraphPoseController : public IPoseController
 	T_RTTI_CLASS;
 
 public:
-	explicit AnimationGraphPoseController(const resource::Proxy< AnimationGraph >& stateGraph, ITransformTime* transformTime);
+	explicit AnimationGraphPoseController(const resource::Proxy< RtStateGraph >& stateGraph, ITransformTime* transformTime);
 
 	bool setState(const std::wstring& stateName);
 
-	void setCondition(const std::wstring& condition, bool enabled, bool reset);
+	bool setParameterValue(const render::Handle& parameter, bool value);
 
 	void setTime(float time);
 
@@ -63,21 +60,10 @@ public:
 		const Transform& worldTransform,
 		const Skeleton* skeleton,
 		const AlignedVector< Transform >& jointTransforms,
-		AlignedVector< Transform >& outPoseTransforms
-	) override final;
+		AlignedVector< Transform >& outPoseTransforms) override final;
 
 private:
-	resource::Proxy< AnimationGraph > m_animationGraph;
-	Ref< ITransformTime > m_transformTime;
-	Ref< StateNode > m_currentState;
-	StateContext m_currentStateContext;
-	Ref< StateNode > m_nextState;
-	StateContext m_nextStateContext;
-	Pose m_evaluatePose;
-	float m_blendState;
-	float m_blendDuration;
-	SmallMap< std::wstring, std::pair< bool, bool > > m_conditions;
-	float m_timeFactor;
+	resource::Proxy< RtStateGraph > m_stateGraph;
 };
 
 }
