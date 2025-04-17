@@ -244,6 +244,7 @@
 								<libraries>
 									<item>Winmm.lib</item>
 									<item>Dbghelp.lib</item>
+									<item>shlwapi.lib</item>
 								</libraries>
 								<warningLevel>WlCompilerDefault</warningLevel>
 								<additionalCompilerOptions/>
@@ -283,6 +284,7 @@
 								<libraries>
 									<item>Winmm.lib</item>
 									<item>Dbghelp.lib</item>
+									<item>shlwapi.lib</item>
 								</libraries>
 								<warningLevel>WlCompilerDefault</warningLevel>
 								<additionalCompilerOptions/>
@@ -322,6 +324,7 @@
 								<libraries>
 									<item>Winmm.lib</item>
 									<item>Dbghelp.lib</item>
+									<item>shlwapi.lib</item>
 								</libraries>
 								<warningLevel>WlCompilerDefault</warningLevel>
 								<additionalCompilerOptions/>
@@ -357,6 +360,7 @@
 								<libraries>
 									<item>Winmm.lib</item>
 									<item>Dbghelp.lib</item>
+									<item>shlwapi.lib</item>
 								</libraries>
 								<warningLevel>WlCompilerDefault</warningLevel>
 								<additionalCompilerOptions/>
@@ -3711,6 +3715,11 @@
 													</item>
 												</dependencies>
 											</project>
+										</item>
+										<item type="ProjectDependency" version="3">
+											<inheritIncludePaths>true</inheritIncludePaths>
+											<link>LnkYes</link>
+											<project ref="/object/projects/item/dependencies/item[1]/project/dependencies/item[3]/project/dependencies/item[1]/project"/>
 										</item>
 									</dependencies>
 								</project>

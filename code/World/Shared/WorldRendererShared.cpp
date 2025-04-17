@@ -1,6 +1,6 @@
 /*
  * TRAKTOR
- * Copyright (c) 2022-2024 Anders Pistol.
+ * Copyright (c) 2022-2025 Anders Pistol.
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -353,7 +353,7 @@ void WorldRendererShared::setupLightPass(
 			lsd->type = (float)light->getLightType();
 			lsd->rangeRadius[0] = light->getNearRange();
 			lsd->rangeRadius[1] = light->getFarRange();
-			lsd->rangeRadius[2] = std::cos((light->getRadius() - deg2rad(8.0f)) / 2.0f);
+			lsd->rangeRadius[2] = std::cos((light->getRadius() - deg2rad(16.0f)) / 2.0f);
 			lsd->rangeRadius[3] = std::cos(light->getRadius() / 2.0f);
 
 			const Matrix44 lightTransform = view * light->getTransform().toMatrix44();

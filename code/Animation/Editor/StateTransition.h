@@ -1,6 +1,6 @@
 /*
  * TRAKTOR
- * Copyright (c) 2022 Anders Pistol.
+ * Copyright (c) 2022-2025 Anders Pistol.
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -8,13 +8,15 @@
  */
 #pragma once
 
-#include <string>
+#include "Animation/Types.h"
 #include "Core/Ref.h"
 #include "Core/Serialization/ISerializable.h"
 
+#include <string>
+
 // import/export mechanism.
 #undef T_DLLCLASS
-#if defined(T_ANIMATION_EXPORT)
+#if defined(T_ANIMATION_EDITOR_EXPORT)
 #	define T_DLLCLASS T_DLLEXPORT
 #else
 #	define T_DLLCLASS T_DLLIMPORT
@@ -28,20 +30,14 @@ class StateNode;
 /*! Animation graph transition.
  * \ingroup Animation
  */
-class T_DLLCLASS Transition : public ISerializable
+class T_DLLCLASS StateTransition : public ISerializable
 {
 	T_RTTI_CLASS;
 
 public:
-	enum class Moment
-	{
-		Immediatly,
-		End
-	};
+	StateTransition() = default;
 
-	Transition() = default;
-
-	explicit Transition(StateNode* from, StateNode* to);
+	explicit StateTransition(StateNode* from, StateNode* to);
 
 	StateNode* from() const;
 

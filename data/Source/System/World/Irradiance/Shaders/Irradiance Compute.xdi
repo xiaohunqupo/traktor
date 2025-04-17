@@ -45,7 +45,7 @@
 			<comment/>
 			<position>
 				<first>-2327</first>
-				<second>-2359</second>
+				<second>-2323</second>
 			</position>
 			<name>L_TexCoord</name>
 		</item>
@@ -60,8 +60,8 @@
 			<technique>World_ComputeIrradiance_RT</technique>
 			<domain>Compute</domain>
 			<localSize>
-				<X>8</X>
-				<Y>8</Y>
+				<X>16</X>
+				<Y>16</Y>
 				<Z>1</Z>
 			</localSize>
 			<useRayTracing>true</useRayTracing>
@@ -129,22 +129,28 @@
 			</inputPins>
 			<outputPins/>
 			<script><![CDATA[
-#define USE_RESERVOIR 1
 #define USE_SECOND_BOUNCE 1
+#define USE_TEMPORAL_FILTER 1
+#define USE_SPATIAL_FILTER 1
 
 const int N = 2;
 const int Ndisclose = 32;
-const int Nspatial = 8;
+const int Nspatial = 16;
 const int K = 20;
-const float NormalThreshold = 0.95f;
-const float DepthThreshold = 10.0f;
-const float Far = 90.0f;
-const float FarSecond = 40.0f;
+const float Far = 20.0f;
+const float FarSecond = 10.0f;
+const float TemporalNormalThreshold = 0.9f;
+const float TemporalDepthThreshold = 2.0f;
+const float SpatialNormalThreshold = 0.95f;
+const float SpatialDepthThreshold = 1.0f;
+const float SpatialFilterRadius = 0.01f;
+const float SpatialFilterCoeff = 0.75f;
 
 const ivec2 sz = imageSize($Output);
 const ivec2 pt = ivec2(gl_GlobalInvocationID.xy);
 const int index = pt.x + pt.y * sz.x;
-const ivec2 uvpt = pt - ivec2($Velocity.xy * sz);
+const vec2 hdv = sign($Velocity.xy) * 0.5f;
+const ivec2 uvpt = pt - ivec2($Velocity.xy * vec2(sz) + hdv);
 const ivec2 cvpt = clamp(uvpt, ivec2(0), sz - 1);
 const int lastIndex = cvpt.x + cvpt.y * sz.x;
 const bool lastIndexOutside = (uvpt != cvpt);
@@ -159,14 +165,15 @@ if (pt.x < sz.x && pt.y < sz.y)
 	bool temporalValid = !lastIndexOutside;
 
 	// 1. Temporal filtering.
-	if (true && !lastIndexOutside)
+#if USE_TEMPORAL_FILTER
+	if (!lastIndexOutside)
 	{
 		$typeof(Reservoir) lastR = $Reservoir[lastIndex];
 
 		temporalValid =
 			!Reservoir_IsEmpty(lastR) &&
-			dot(lastR.normal, $Direction.xyz) >= NormalThreshold &&
-			abs(lastR.depth - $Depth) < DepthThreshold;
+			dot(lastR.normal, $Direction.xyz) >= TemporalNormalThreshold &&
+			abs(lastR.depth - $Depth) < TemporalDepthThreshold;
 
 		if (temporalValid)
 		{
@@ -183,14 +190,16 @@ if (pt.x < sz.x && pt.y < sz.y)
 			
 			reservoir.W_sum = (Reservoir_CalculateProbability(v) / p) * m;
 			reservoir.M = m;
-			reservoir.normal = $Direction.xyz;
+			reservoir.normal = lastR.normal; //$Direction.xyz;
 			reservoir.depth = $Depth;
 			reservoir.radiance = v;
 		}
 	}
+#endif
 
 	// 2. Spatial filtering.
-	if (false)
+#if USE_SPATIAL_FILTER
+	if (!lastIndexOutside)
 	{
 		for (int i = 0; i < Nspatial; ++i)
 		{
@@ -199,7 +208,9 @@ if (pt.x < sz.x && pt.y < sz.y)
 				Hash(rndState++)
 			) - 1.0f;
 
-			const ivec2 spt = uvpt - ivec2(offset * sz * 0.005f);
+			const float ratio = float(sz.y) / sz.x;
+			const vec2 radius = vec2(SpatialFilterRadius, SpatialFilterRadius * ratio);
+			const ivec2 spt = uvpt - ivec2(offset * sz * radius);
 			
 			if (spt.x >= 0 && spt.y >= 0 && spt.x < sz.x && spt.y < sz.y)
 			{
@@ -208,129 +219,140 @@ if (pt.x < sz.x && pt.y < sz.y)
 
 				const bool valid =
 					!Reservoir_IsEmpty(spatR) &&
-					dot(spatR.normal, $Direction.xyz) >= NormalThreshold;
+					dot(spatR.normal, $Direction.xyz) >= SpatialNormalThreshold &&
+					abs(spatR.depth - $Depth) < SpatialDepthThreshold;
 		
 				if (valid)
 				{
-					const float P_hat = Reservoir_CalculateProbability(spatR.radiance);
+					const vec3 r1 = Reservoir_GetRadiance(reservoir);
+					const vec3 r2 = Reservoir_GetRadiance(spatR);
 
-					const float m = min(spatR.M, K);
-					const float w =
-						P_hat > 0.0f ?
-						(1.0f / P_hat) * (spatR.W_sum / spatR.M) :
-						0.0f;
-		
-					const vec3 v = spatR.radiance * w;
+					const vec3 r = mix(r1, r2, SpatialFilterCoeff);
 
-					const float P_hat2 = Reservoir_CalculateProbability(v);
-					
-					reservoir.W_sum += P_hat2 * m;
-					reservoir.M += m;
-
-					if (Hash(rndState++) < w / reservoir.W_sum)
-					{
-						reservoir.normal = spatR.normal;
-						reservoir.depth = $Depth;
-						reservoir.radiance = v;
-					}
+					const float w = Reservoir_CalculateProbability(r);
+					Reservoir_Update(
+						reservoir,
+						w,
+						$Direction.xyz,
+						$Depth,
+						r,
+						Hash(rndState++)
+					);
 				}
 			}
 		}
 	}
+#endif
 
 	// 3. Sample generation.
-	const mat3 R = Rotate($Direction.xyz, Hash(rndState++));
-	const int sampleN = temporalValid ? N : Ndisclose;
-
-	for (int I = 0; I < sampleN; I += N)
+	if (true)
 	{
-		vec3 Nacc = vec3(0.0f);
-		for (int i = 0; i < N; ++i)
-		{
-			const vec2 r = Rotate2D((Hammersley(rndState++ % K, K)) * 2.0f - 1.0f, Hash(rndState++)) * 0.5f + 0.5f;
-			const vec3 rayOrigin = $Origin.xyz;
-			const vec3 rayDir = R * LambertianDirection($Direction.xyz, r);
-			const float phi = 0.5f;
-	
-			HWRT_Material m;
-			float t;
-	
-			if (HWRT_Trace($AS, rayOrigin, rayDir, Far, m, t))
-			{
-				const vec3 hit = rayOrigin + rayDir * t;
-				const float attenuate = LightAttenuation(t);
-				
-				for (int lightIndex = 0; lightIndex < $LightCount; ++lightIndex)
-				{
-					const $typeof(Lights) light = $Lights[lightIndex];
-					const vec4 incident = HWRT_Light_CalculateIncidentLight($AS, $ViewInverse, light, hit, m.normal.xyz);
-					Nacc += (m.albedo * incident.xyz * attenuate * phi * PI).xyz;
-				}
-	
-				Nacc += m.albedo * m.emissive * attenuate * phi * PI;
-	
-#if USE_SECOND_BOUNCE
-				{
-					vec3 Sacc = vec3(0.0f);
-					HWRT_Material m2;
-					float t2;
-		
-					const vec2 r = Rotate2D((Hammersley(rndState++ % K, K)) * 2.0f - 1.0f, Hash(rndState++)) * 0.5f + 0.5f;
-					const vec3 secondRayDir = LambertianDirection(m.normal.xyz, r);
-	
-					if (HWRT_Trace($AS, hit, secondRayDir, FarSecond, m2, t2))
-					{
-						const float attenuate2 = LightAttenuation(t2);
+		const mat3 R = Rotate($Direction.xyz, Hash(rndState++) * TWO_PI);
+		const int sampleN = (reservoir.M > K) ? N : Ndisclose;
 
-						for (int lightIndex = 0; lightIndex < $LightCount; ++lightIndex)
-						{
-							const float pdfRandomLight = 1.0f; // 1.0f / max($LightCount, 1);
-							//const int lightIndex = int(Hash(rndState++) * $LightCount) % int($LightCount);
-							const $typeof(Lights) light = $Lights[lightIndex];
+#if 0
+		const bool traceShadows = (Hash(rndState++) > 0.25f);
+		const float traceShadowsP = traceShadows ? 1.0f : 0.25f;
+#else
+		const bool traceShadows = true;
+		const float traceShadowsP = 1.0f;
+#endif
+
+		for (int I = 0; I < sampleN; I += N)
+		{
+			vec3 Nacc = vec3(0.0f);
+			for (int i = 0; i < N; ++i)
+			{
+				const vec2 r = Rotate2D((Hammersley(rndState++ % K, K)) * 2.0f - 1.0f, Hash(rndState++)) * 0.5f + 0.5f;
+				const vec3 rayOrigin = $Origin.xyz;
+				const vec3 rayDir = R * LambertianDirection($Direction.xyz, r);
+				const float phi = 0.5f;
 		
-							const vec3 hit2 = hit + secondRayDir * t;
-							const vec4 incident = HWRT_Light_CalculateIncidentLight($AS, $ViewInverse, light, hit2, m2.normal.xyz);
+				HWRT_Material m;
+				float t;
 		
-							Sacc += (m2.albedo * incident.xyz * attenuate2 * phi * PI / pdfRandomLight).xyz;
-						}
-		
-						Sacc += vec3(m2.albedo * m2.emissive * attenuate2 * phi);
+				if (HWRT_Trace($AS, rayOrigin, rayDir, Far, m, t))
+				{
+					const vec3 hit = rayOrigin + rayDir * t;
+					const float attenuate = LightAttenuation(t);
+					
+					for (int lightIndex = 0; lightIndex < $LightCount; ++lightIndex)
+					{
+						const $typeof(Lights) light = $Lights[lightIndex];
+						const vec4 incident = HWRT_Light_CalculateIncidentLight(
+							$AS,
+							$ViewInverse,
+							light,
+							hit,
+							m.normal.xyz,
+							traceShadows
+						);
+						Nacc += traceShadowsP * (m.albedo * incident.xyz * attenuate * phi * PI).xyz;
 					}
 		
-					Nacc += m.albedo * Sacc;
-				}
-#endif
-			}
-			else
-			{
-				Nacc += $Sky.xyz;
-			}
-		}
+					Nacc += m.albedo * m.emissive * attenuate * phi * PI;
+		
+#if USE_SECOND_BOUNCE
+					{
+						vec3 Sacc = vec3(0.0f);
+						HWRT_Material m2;
+						float t2;
+			
+						const vec2 r = Rotate2D((Hammersley(rndState++ % K, K)) * 2.0f - 1.0f, Hash(rndState++)) * 0.5f + 0.5f;
+						const vec3 secondRayDir = LambertianDirection(m.normal.xyz, r);
+		
+						if (HWRT_Trace($AS, hit, secondRayDir, FarSecond, m2, t2))
+						{
+							const float attenuate2 = LightAttenuation(t2);
 	
-		const float w = Reservoir_CalculateProbability(Nacc.xyz / N);
-		Reservoir_Update(
-			reservoir,
-			w,
-			$Direction.xyz,
-			$Depth,
-			Nacc / N,
-			Hash(rndState++)
-		);
+							for (int lightIndex = 0; lightIndex < $LightCount; ++lightIndex)
+							{
+								const float pdfRandomLight = 1.0f; // 1.0f / max($LightCount, 1);
+								//const int lightIndex = int(Hash(rndState++) * $LightCount) % int($LightCount);
+								const $typeof(Lights) light = $Lights[lightIndex];
+			
+								const vec3 hit2 = hit + secondRayDir * t;
+								const vec4 incident = HWRT_Light_CalculateIncidentLight(
+									$AS,
+									$ViewInverse,
+									light,
+									hit2,
+									m2.normal.xyz,
+									traceShadows
+								);
+			
+								Sacc += traceShadowsP * (m2.albedo * incident.xyz * attenuate2 * phi * PI / pdfRandomLight).xyz;
+							}
+			
+							Sacc += vec3(m2.albedo * m2.emissive * attenuate2 * phi);
+						}
+			
+						Nacc += m.albedo * Sacc;
+					}
+#endif
+				}
+				else
+				{
+					Nacc += $Sky.xyz;
+				}
+			}
+		
+			const float w = Reservoir_CalculateProbability(Nacc.xyz / N);
+			Reservoir_Update(
+				reservoir,
+				w,
+				$Direction.xyz,
+				$Depth,
+				Nacc / N,
+				Hash(rndState++)
+			);
+		}
 	}
 
 	// 3. Calculate lighting.
 	vec4 acc = vec4(0.0f.xxx, 1.0f);
 	if (!Reservoir_IsEmpty(reservoir))
-	{
-		const float P_hat = Reservoir_CalculateProbability(reservoir.radiance);
-		const float w = 
-			(P_hat > 0.0f) ?
-			(1.0f / P_hat) * (reservoir.W_sum / reservoir.M) :
-			0.0f;
-
-		acc += vec4(reservoir.radiance * w, 1.0f);
-	}
-	
+		acc += vec4(Reservoir_GetRadiance(reservoir), 1.0f);
 
 #if 0
 	acc = temporalValid ? 
@@ -547,7 +569,7 @@ $Output = BlueNoise(seed);
 			<comment/>
 			<position>
 				<first>-1665</first>
-				<second>-2289</second>
+				<second>-2321</second>
 			</position>
 			<name>L_ViewNormal</name>
 		</item>
@@ -555,8 +577,8 @@ $Output = BlueNoise(seed);
 			<id>{0284F560-D0B6-164C-88A4-DF98612D8559}</id>
 			<comment/>
 			<position>
-				<first>-1874</first>
-				<second>-2249</second>
+				<first>-1876</first>
+				<second>-2313</second>
 			</position>
 			<swizzle>yzw</swizzle>
 		</item>
@@ -577,15 +599,6 @@ $Output = BlueNoise(seed);
 			<mipBias>0</mipBias>
 			<ignoreMips>true</ignoreMips>
 			<useAnisotropic>false</useAnisotropic>
-		</item>
-		<item type="traktor.render.Variable" version="2,traktor.render.Node:1">
-			<id>{DC55EDE7-0056-6040-826B-4AB3E8703560}</id>
-			<comment/>
-			<position>
-				<first>-2327</first>
-				<second>-2224</second>
-			</position>
-			<name>L_TexCoord</name>
 		</item>
 		<item type="traktor.render.Variable" version="2,traktor.render.Node:1">
 			<id>{03E01579-FD74-5E43-906E-78BC0A318CC2}</id>
@@ -637,7 +650,10 @@ $Output = BlueNoise(seed);
 			</outputPins>
 			<script><![CDATA[const ivec2 sz = imageSize($Target);
 const ivec2 pt = ivec2(gl_GlobalInvocationID.xy);
-$TexCoord = vec4(vec2(pt + 0.5f) / sz, 0.0f, 0.0f);
+$TexCoord = vec4(
+	vec2(pt + 0.5f) / sz,
+	vec2(pt) / sz
+);
 
 ]]></script>
 		</item>
@@ -645,7 +661,7 @@ $TexCoord = vec4(vec2(pt + 0.5f) / sz, 0.0f, 0.0f);
 			<id>{F9ABE3FB-F13F-1640-AE15-54AD807C5EB7}</id>
 			<comment/>
 			<position>
-				<first>-2406</first>
+				<first>-2375</first>
 				<second>-2693</second>
 			</position>
 			<declaration>{11EF2BEA-52A2-7F4E-91C0-DCED034FE9A3}</declaration>
@@ -692,8 +708,8 @@ $TexCoord = vec4(vec2(pt + 0.5f) / sz, 0.0f, 0.0f);
 			<id>{766B8B3D-F012-7041-B805-D59CE2D64887}</id>
 			<comment/>
 			<position>
-				<first>-2124</first>
-				<second>-2025</second>
+				<first>-1891</first>
+				<second>-2010</second>
 			</position>
 			<value>-0.5, 0.5, 0, 0</value>
 		</item>
@@ -719,16 +735,16 @@ $TexCoord = vec4(vec2(pt + 0.5f) / sz, 0.0f, 0.0f);
 			<id>{8437370D-BEA0-0446-A757-D851CFD62110}</id>
 			<comment/>
 			<position>
-				<first>-1876</first>
-				<second>-2101</second>
+				<first>-1643</first>
+				<second>-2086</second>
 			</position>
 		</item>
 		<item type="traktor.render.Variable" version="2,traktor.render.Node:1">
 			<id>{3FB766B4-DCFA-2240-93AE-D2C072271A60}</id>
 			<comment/>
 			<position>
-				<first>-1665</first>
-				<second>-2133</second>
+				<first>-1432</first>
+				<second>-2118</second>
 			</position>
 			<name>L_Velocity</name>
 		</item>
@@ -1001,7 +1017,7 @@ imageStore($Output, pt, $Sky);
 			<id>{98C1AD24-0DD8-FD44-B64D-4553F10A7976}</id>
 			<comment/>
 			<position>
-				<first>-2334</first>
+				<first>-2327</first>
 				<second>-2569</second>
 			</position>
 			<declaration>{89925F19-BD6D-8F47-809D-A21A1BA4D0B5}</declaration>
@@ -1031,7 +1047,7 @@ imageStore($Output, pt, $Sky);
 			<comment/>
 			<position>
 				<first>-1665</first>
-				<second>-2211</second>
+				<second>-2279</second>
 			</position>
 			<name>L_Depth</name>
 		</item>
@@ -1039,8 +1055,8 @@ imageStore($Output, pt, $Sky);
 			<id>{5FF44CCA-F3C1-1B45-BAD1-640BC6258605}</id>
 			<comment/>
 			<position>
-				<first>-1874</first>
-				<second>-2201</second>
+				<first>-1876</first>
+				<second>-2265</second>
 			</position>
 			<swizzle>x</swizzle>
 		</item>
@@ -1053,6 +1069,15 @@ imageStore($Output, pt, $Sky);
 			</position>
 			<name>L_Depth</name>
 		</item>
+		<item type="traktor.render.Variable" version="2,traktor.render.Node:1">
+			<id>{C476352F-E139-804E-BF81-9693BBF1CBE6}</id>
+			<comment/>
+			<position>
+				<first>-1913</first>
+				<second>-2717</second>
+			</position>
+			<name>L_TexCoord_NoJitter</name>
+		</item>
 	</nodes>
 	<edges>
 		<item type="traktor.render.Edge" version="1">
@@ -1063,16 +1088,6 @@ imageStore($Output, pt, $Sky);
 			<destination>
 				<node ref="/object/nodes/item[1]"/>
 				<id>{21224915-74B4-6F45-A7A6-84C7637CAA9D}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[2]"/>
-				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[1]"/>
-				<id>{6AADDFA3-E292-B14B-95C7-220C9A9F6D18}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
@@ -1267,21 +1282,11 @@ imageStore($Output, pt, $Sky);
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[23]"/>
-				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[22]"/>
-				<id>{6D5C5EFE-A35C-4748-B81E-B8EBACE433BC}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[25]"/>
+				<node ref="/object/nodes/item[24]"/>
 				<id>{ADB4FC1D-3726-4CC5-B4D5-1E2468274325}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[24]"/>
+				<node ref="/object/nodes/item[23]"/>
 				<id>{11585EBC-914D-4E6D-A10D-D01694FF9840}</id>
 			</destination>
 		</item>
@@ -1291,23 +1296,23 @@ imageStore($Output, pt, $Sky);
 				<id>{EC8FB7BC-0628-8E40-B84B-63F8667AC64B}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[25]"/>
+				<node ref="/object/nodes/item[24]"/>
 				<id>{F2E22CA6-DFF3-4B20-A70A-0D7A44EACD8C}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[27]"/>
+				<node ref="/object/nodes/item[26]"/>
 				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[26]"/>
+				<node ref="/object/nodes/item[25]"/>
 				<id>{FBF07575-7AF0-6B4F-A538-7E9475A05FD4}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[29]"/>
+				<node ref="/object/nodes/item[28]"/>
 				<id>{ACC77B35-91B5-4405-ABC8-D0DA24D68178}</id>
 			</source>
 			<destination>
@@ -1317,42 +1322,142 @@ imageStore($Output, pt, $Sky);
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[33]"/>
+				<node ref="/object/nodes/item[32]"/>
 				<id>{9E839249-E9B9-4736-8BDD-A95A1C892B42}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[34]"/>
+				<node ref="/object/nodes/item[33]"/>
 				<id>{11585EBC-914D-4E6D-A10D-D01694FF9840}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[32]"/>
-				<id>{AF6C971B-D67A-42EE-A12B-97D36927C89F}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[33]"/>
-				<id>{69997292-C813-490C-910C-620B9AD3A2BB}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[31]"/>
+				<node ref="/object/nodes/item[30]"/>
 				<id>{D51E6077-37E9-4B1C-86D2-92DA544DC613}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[33]"/>
+				<node ref="/object/nodes/item[32]"/>
 				<id>{D2D716D6-C4A1-471F-894A-D718515F6281}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[35]"/>
+				<node ref="/object/nodes/item[34]"/>
 				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[32]"/>
+				<node ref="/object/nodes/item[31]"/>
 				<id>{32EB5230-1F0D-40B8-93F6-9C8E5469454E}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[40]"/>
+				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[39]"/>
+				<id>{71A0310C-3928-44C3-8D4F-7D9AFF9EAE70}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[42]"/>
+				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[41]"/>
+				<id>{71A0310C-3928-44C3-8D4F-7D9AFF9EAE70}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[43]"/>
+				<id>{ADB4FC1D-3726-4CC5-B4D5-1E2468274325}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[41]"/>
+				<id>{345BDBFA-3326-40BF-B9DE-8ECA78A3EEF4}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[44]"/>
+				<id>{ADB4FC1D-3726-4CC5-B4D5-1E2468274325}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[39]"/>
+				<id>{345BDBFA-3326-40BF-B9DE-8ECA78A3EEF4}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[46]"/>
+				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[43]"/>
+				<id>{F2E22CA6-DFF3-4B20-A70A-0D7A44EACD8C}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[47]"/>
+				<id>{4B2822D0-4D9A-4BBB-9956-A996493EE672}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[38]"/>
+				<id>{92AA3735-BB4C-4541-81DA-AC500930B2E6}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[41]"/>
+				<id>{70C35B91-1C36-454C-98EC-7514AACF73C8}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[45]"/>
+				<id>{A30C6A23-2170-447A-A127-17A60A09574F}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[39]"/>
+				<id>{70C35B91-1C36-454C-98EC-7514AACF73C8}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[45]"/>
+				<id>{DE98332B-0513-442C-B08C-234969B7C79F}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[48]"/>
+				<id>{08532144-809B-4726-A819-F8E3F9CF7515}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[49]"/>
+				<id>{A1DDB166-9422-45A3-AE93-6702275DAD1C}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[39]"/>
+				<id>{70C35B91-1C36-454C-98EC-7514AACF73C8}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[48]"/>
+				<id>{DE98332B-0513-442C-B08C-234969B7C79F}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[45]"/>
+				<id>{08532144-809B-4726-A819-F8E3F9CF7515}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[49]"/>
+				<id>{92AA3735-BB4C-4541-81DA-AC500930B2E6}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
@@ -1361,183 +1466,63 @@ imageStore($Output, pt, $Sky);
 				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[32]"/>
-				<id>{6D5C5EFE-A35C-4748-B81E-B8EBACE433BC}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[41]"/>
-				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[40]"/>
-				<id>{71A0310C-3928-44C3-8D4F-7D9AFF9EAE70}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[43]"/>
-				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[42]"/>
-				<id>{71A0310C-3928-44C3-8D4F-7D9AFF9EAE70}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[44]"/>
-				<id>{ADB4FC1D-3726-4CC5-B4D5-1E2468274325}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[42]"/>
-				<id>{345BDBFA-3326-40BF-B9DE-8ECA78A3EEF4}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[45]"/>
-				<id>{ADB4FC1D-3726-4CC5-B4D5-1E2468274325}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[40]"/>
-				<id>{345BDBFA-3326-40BF-B9DE-8ECA78A3EEF4}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[47]"/>
-				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
-			</source>
-			<destination>
 				<node ref="/object/nodes/item[44]"/>
 				<id>{F2E22CA6-DFF3-4B20-A70A-0D7A44EACD8C}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[48]"/>
-				<id>{4B2822D0-4D9A-4BBB-9956-A996493EE672}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[39]"/>
-				<id>{92AA3735-BB4C-4541-81DA-AC500930B2E6}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[42]"/>
-				<id>{70C35B91-1C36-454C-98EC-7514AACF73C8}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[46]"/>
-				<id>{A30C6A23-2170-447A-A127-17A60A09574F}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[40]"/>
-				<id>{70C35B91-1C36-454C-98EC-7514AACF73C8}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[46]"/>
-				<id>{DE98332B-0513-442C-B08C-234969B7C79F}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[49]"/>
-				<id>{08532144-809B-4726-A819-F8E3F9CF7515}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[50]"/>
-				<id>{A1DDB166-9422-45A3-AE93-6702275DAD1C}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[40]"/>
-				<id>{70C35B91-1C36-454C-98EC-7514AACF73C8}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[49]"/>
-				<id>{DE98332B-0513-442C-B08C-234969B7C79F}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[46]"/>
-				<id>{08532144-809B-4726-A819-F8E3F9CF7515}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[50]"/>
-				<id>{92AA3735-BB4C-4541-81DA-AC500930B2E6}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
 				<node ref="/object/nodes/item[38]"/>
-				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
-			</source>
-			<destination>
-				<node ref="/object/nodes/item[45]"/>
-				<id>{F2E22CA6-DFF3-4B20-A70A-0D7A44EACD8C}</id>
-			</destination>
-		</item>
-		<item type="traktor.render.Edge" version="1">
-			<source>
-				<node ref="/object/nodes/item[39]"/>
 				<id>{9D9FA2FC-9298-4A6F-88A9-A055F8A91F52}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[53]"/>
+				<node ref="/object/nodes/item[52]"/>
 				<id>{F2E22CA6-DFF3-4B20-A70A-0D7A44EACD8C}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[53]"/>
+				<node ref="/object/nodes/item[52]"/>
 				<id>{ADB4FC1D-3726-4CC5-B4D5-1E2468274325}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[51]"/>
+				<node ref="/object/nodes/item[50]"/>
 				<id>{11585EBC-914D-4E6D-A10D-D01694FF9840}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[50]"/>
+				<node ref="/object/nodes/item[49]"/>
 				<id>{9D9FA2FC-9298-4A6F-88A9-A055F8A91F52}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[39]"/>
+				<node ref="/object/nodes/item[38]"/>
 				<id>{A1DDB166-9422-45A3-AE93-6702275DAD1C}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[55]"/>
+				<node ref="/object/nodes/item[54]"/>
 				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[54]"/>
+				<node ref="/object/nodes/item[53]"/>
 				<id>{8BDC6BB6-2505-4B86-8453-EA8145B953CD}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[56]"/>
+				<node ref="/object/nodes/item[55]"/>
 				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[54]"/>
+				<node ref="/object/nodes/item[53]"/>
 				<id>{EADA77CC-17C7-41D7-B0E1-8D59463CCDD6}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[30]"/>
+				<node ref="/object/nodes/item[29]"/>
 				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
 			</source>
 			<destination>
@@ -1547,7 +1532,7 @@ imageStore($Output, pt, $Sky);
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[36]"/>
+				<node ref="/object/nodes/item[35]"/>
 				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
 			</source>
 			<destination>
@@ -1557,7 +1542,7 @@ imageStore($Output, pt, $Sky);
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[52]"/>
+				<node ref="/object/nodes/item[51]"/>
 				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
 			</source>
 			<destination>
@@ -1567,41 +1552,41 @@ imageStore($Output, pt, $Sky);
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[57]"/>
+				<node ref="/object/nodes/item[56]"/>
 				<id>{1E6639B6-8B58-4694-99E7-C058E3583522}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[58]"/>
+				<node ref="/object/nodes/item[57]"/>
 				<id>{F2E22CA6-DFF3-4B20-A70A-0D7A44EACD8C}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[58]"/>
+				<node ref="/object/nodes/item[57]"/>
 				<id>{ADB4FC1D-3726-4CC5-B4D5-1E2468274325}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[59]"/>
+				<node ref="/object/nodes/item[58]"/>
 				<id>{8C41D88A-1D17-4237-B720-CCC0B7FF71B9}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[26]"/>
+				<node ref="/object/nodes/item[25]"/>
 				<id>{799F1052-8951-5E4F-8416-5653C60F498C}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[59]"/>
+				<node ref="/object/nodes/item[58]"/>
 				<id>{AA571ACC-7699-4D10-BCD7-4E857EFB35EA}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[59]"/>
+				<node ref="/object/nodes/item[58]"/>
 				<id>{2D90AB77-694C-4586-AA05-5CF062EFFFAB}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[28]"/>
+				<node ref="/object/nodes/item[27]"/>
 				<id>{11585EBC-914D-4E6D-A10D-D01694FF9840}</id>
 			</destination>
 		</item>
@@ -1611,28 +1596,78 @@ imageStore($Output, pt, $Sky);
 				<id>{AF6C971B-D67A-42EE-A12B-97D36927C89F}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[61]"/>
+				<node ref="/object/nodes/item[60]"/>
 				<id>{F2E22CA6-DFF3-4B20-A70A-0D7A44EACD8C}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[61]"/>
+				<node ref="/object/nodes/item[60]"/>
 				<id>{ADB4FC1D-3726-4CC5-B4D5-1E2468274325}</id>
 			</source>
 			<destination>
-				<node ref="/object/nodes/item[60]"/>
+				<node ref="/object/nodes/item[59]"/>
 				<id>{11585EBC-914D-4E6D-A10D-D01694FF9840}</id>
 			</destination>
 		</item>
 		<item type="traktor.render.Edge" version="1">
 			<source>
-				<node ref="/object/nodes/item[62]"/>
+				<node ref="/object/nodes/item[61]"/>
 				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
 			</source>
 			<destination>
 				<node ref="/object/nodes/item[3]"/>
 				<id>{E204E2D0-3918-4A42-A83B-035B9F452AD4}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[25]"/>
+				<id>{799F1052-8951-5E4F-8416-5653C60F498C}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[62]"/>
+				<id>{11585EBC-914D-4E6D-A10D-D01694FF9840}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[36]"/>
+				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[31]"/>
+				<id>{6D5C5EFE-A35C-4748-B81E-B8EBACE433BC}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[31]"/>
+				<id>{AF6C971B-D67A-42EE-A12B-97D36927C89F}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[32]"/>
+				<id>{69997292-C813-490C-910C-620B9AD3A2BB}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[2]"/>
+				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[1]"/>
+				<id>{6AADDFA3-E292-B14B-95C7-220C9A9F6D18}</id>
+			</destination>
+		</item>
+		<item type="traktor.render.Edge" version="1">
+			<source>
+				<node ref="/object/nodes/item[2]"/>
+				<id>{84BF3C26-64A7-4032-B775-1D369052B243}</id>
+			</source>
+			<destination>
+				<node ref="/object/nodes/item[22]"/>
+				<id>{6D5C5EFE-A35C-4748-B81E-B8EBACE433BC}</id>
 			</destination>
 		</item>
 	</edges>
